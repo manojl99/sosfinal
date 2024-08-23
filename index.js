@@ -157,6 +157,31 @@ app.post('/api/location', [
   });
 });
 
+// Route to get nearby users
+app.get('/api/nearby-users', (req, res) => {
+  // Assuming you want to return users within a fixed radius (e.g., 5 km) from a central point
+  // You could add parameters to the request to customize this behavior
+  const { latitude, longitude } = req.query;
+
+  if (!latitude || !longitude) {
+    return res.status(400).json({ status: 'error', message: 'Latitude and longitude are required.' });
+  }
+
+  const nearbyUsers = [];
+  for (const [userId, location] of userLocations) {
+    const distance = haversineDistance(latitude, longitude, location.latitude, location.longitude);
+    if (distance <= 5) { // 5 km radius
+      nearbyUsers.push({
+        userId,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      });
+    }
+  }
+
+  res.json(nearbyUsers);
+});
+
 // Health check route
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
