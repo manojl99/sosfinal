@@ -4,24 +4,21 @@ const axios = require('axios');
 const cors = require('cors');
 const { check, validationResult } = require('express-validator');
 const winston = require('winston');
-const http = require('http');
-const socketIo = require('socket.io');
 
 const app = express();
-const port = 3000;
 
-// Native Notify configuration
+// Native Notify configuration (replace these with your actual API keys if needed)
 const NATIVE_NOTIFY_API_URL = 'https://app.nativenotify.com/api/notification';
 const NATIVE_NOTIFY_APP_ID = '23151';
 const NATIVE_NOTIFY_APP_TOKEN = 'zaFxawdeQ9Y1PqSuGKdMMo';
 
-// In-memory stores
-const userLocations = new Map(); // To store user locations
-const sosPressCount = new Map();  // To store SOS press counts
+// In-memory stores (Note: These will reset on each function invocation)
+const userLocations = new Map();
+const sosPressCount = new Map();
 
 // Middleware
 app.use(bodyParser.json());
-app.use(cors()); // Allow cross-origin requests
+app.use(cors());
 
 // Setup logging
 const logger = winston.createLogger({
@@ -32,13 +29,13 @@ const logger = winston.createLogger({
   ),
   transports: [
     new winston.transports.Console(),
-    new winston.transports.File({ filename: 'combined.log' })
+    new winston.transports.File({ filename: 'combined.log' }) // Adjust the path as needed
   ]
 });
 
 // Haversine formula to calculate distance between two points (in kilometers)
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // Radius of the Earth in kilometers
+  const R = 6371; // Earth's radius in kilometers
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -47,12 +44,12 @@ const haversineDistance = (lat1, lon1, lat2, lon2) => {
     Math.cos(lat2 * (Math.PI / 180)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // Distance in kilometers
+  return R * c;
 };
 
 // Helper function for sending notifications with retry logic
 const sendNotification = async (user, message, latitude, longitude, screen) => {
-  const maxRetries = 10;
+  const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await axios.post(NATIVE_NOTIFY_API_URL, {
@@ -64,23 +61,23 @@ const sendNotification = async (user, message, latitude, longitude, screen) => {
           type: 'SOS',
           latitude,
           longitude,
-          screen  // Specify the screen to navigate to
+          screen
         }
       });
       logger.info(`Notification sent to user ${user}: ${response.status}`);
-      return; // Exit on success
+      return;
     } catch (error) {
       logger.error(`Error sending notification to user ${user} on attempt ${attempt}: ${error.message}`);
       if (attempt === maxRetries) {
         logger.error(`Failed to send notification to user ${user} after ${maxRetries} attempts.`);
       }
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
 };
 
 // Route for SOS button press
-app.post('/sos', [
+app.post('/api/sos', [
   check('userId').isString().notEmpty(),
   check('latitude').isFloat({ min: -90, max: 90 }),
   check('longitude').isFloat({ min: -180, max: 180 })
@@ -92,19 +89,16 @@ app.post('/sos', [
 
   const { userId, latitude, longitude } = req.body;
 
-  // Create the message and data to send
   const googleMapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
   const message = `Help! I'm in danger. My current location is:\nLatitude: ${latitude}\nLongitude: ${longitude}\n[Open in Google Maps](${googleMapsLink})`;
 
-  // Track SOS button presses
   const currentPressCount = sosPressCount.get(userId) || 0;
   sosPressCount.set(userId, currentPressCount + 1);
 
-  // Get nearby users based on the latest stored location
   const nearbyUsers = [];
   for (const [otherUserId, location] of userLocations) {
     const distance = haversineDistance(latitude, longitude, location.latitude, location.longitude);
-    if (distance <= 5) { // 5 kilometers radius
+    if (distance <= 5) {
       nearbyUsers.push(otherUserId);
     }
   }
@@ -114,21 +108,17 @@ app.post('/sos', [
   }
 
   try {
-    // Send push notification via Native Notify to nearby users
     const notifications = nearbyUsers.map(user =>
-      sendNotification(user, message, latitude, longitude, 'HelpScreen')  // Pass screen name here
+      sendNotification(user, message, latitude, longitude, 'HelpScreen')
     );
     await Promise.all(notifications);
-
-    // Emit SOS alert to nearby users via Socket.IO
-    io.emit('sosAlert', { userId, latitude, longitude, message });
 
     logger.info(`SOS notifications sent to ${nearbyUsers.length} users.`);
 
     res.json({
       status: 'success',
       message: 'SOS signal sent successfully.',
-      notificationsSent: nearbyUsers.length, // Number of notifications sent
+      notificationsSent: nearbyUsers.length,
     });
   } catch (error) {
     logger.error('Error sending push notification:', {
@@ -145,7 +135,7 @@ app.post('/sos', [
 });
 
 // Route for continuous location updates
-app.post('/location', [
+app.post('/api/location', [
   check('userId').isString().notEmpty(),
   check('latitude').isFloat({ min: -90, max: 90 }),
   check('longitude').isFloat({ min: -180, max: 180 })
@@ -157,40 +147,23 @@ app.post('/location', [
 
   const { userId, latitude, longitude } = req.body;
 
-  // Update the location data
   userLocations.set(userId, { latitude, longitude });
 
   logger.info(`Received location update from user ${userId}: Latitude ${latitude}, Longitude ${longitude}`);
 
-  // Emit location update to all connected clients
-  io.emit('locationUpdate', { userId, latitude, longitude });
-
-  // Respond with success
   res.json({
     status: 'success',
     message: 'Location data received successfully.',
   });
 });
 
-// Create HTTP server and integrate with Socket.IO
-const server = http.createServer(app);
-const io = socketIo(server);
-
-// Socket.IO event handlers
-io.on('connection', (socket) => {
-  logger.info('A client connected:', socket.id);
-
-  socket.on('disconnect', () => {
-    logger.info('A client disconnected:', socket.id);
-  });
-
-  // Listen for custom events if needed
-  socket.on('customEvent', (data) => {
-    logger.info('Received custom event:', data);
-  });
+// Health check route
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
 // Start the server
-server.listen(port, () => {
-  logger.info(`Server running at http://localhost:${port}`);
+const PORT = 3000; // You can change this to any port you prefer
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
 });
